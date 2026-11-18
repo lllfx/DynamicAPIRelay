@@ -34,6 +34,8 @@ Content-Type: application/json
 - Initial policy: HTTPS on port 443 only, DNS hostnames only (no IP literals), public Internet destination IPs only. Authentication **does not** override SSRF restrictions.
 - v1 does **not** follow redirects automatically. A 3xx `Location` is returned as received; clients must avoid following it directly if they require every hop to use the relay.
 
+**中文版完整设计方案：** [docs/DESIGN_ZH.md](docs/DESIGN_ZH.md) — 需求、接口、安全、模块拆分及验收标准。
+
 ## Design documents
 
 1. [Architecture & component boundaries](docs/ARCHITECTURE.md)
