@@ -1,0 +1,45 @@
+# DynamicAPIRelay deployment.
+#
+#   cp deploy/relay.env.example relay.env   # set RELAY_KEYS and RELAY_DASHBOARD_PASSWORD
+#   docker compose up -d --build
+#
+# Relay:     http://<server-ip>:8080/v1/relay   (plain HTTP — see README "Deploying with Docker")
+# Dashboard: bound to the host's 127.0.0.1:8081 only; open via
+#            ssh -L 8081:127.0.0.1:8081 <server>  then http://127.0.0.1:8081/
+services:
+  relay:
+    build:
+      context: .
+      args:
+        # China-side build hosts: GOPROXY=https://goproxy.cn,direct docker compose build
+        GOPROXY: ${GOPROXY:-https://proxy.golang.org,direct}
+    image: dynamic-api-relay:latest
+    container_name: dynamic-api-relay
+    restart: unless-stopped
+    env_file:
+      - ./relay.env
+    environment:
+      # These override relay.env: container networking and storage.
+      RELAY_LISTEN_ADDR: 0.0.0.0:8080
+      RELAY_DASHBOARD_ADDR: 0.0.0.0:8081 # non-loopback inside the container => RELAY_DASHBOARD_PASSWORD is required
+      RELAY_STATS_DB: /data/relay-stats.db
+      RELAY_TRUSTED_PROXIES: "" # no reverse proxy in front: never trust X-Forwarded-For
+    ports:
+      # Host ports are overridable: RELAY_HOST_PORT=9000 DASHBOARD_HOST_PORT=9001 docker compose up -d
+      - "${RELAY_HOST_PORT:-8080}:8080"
+      - "127.0.0.1:${DASHBOARD_HOST_PORT:-8081}:8081"
+    volumes:
+      - relay-data:/data
+    read_only: true
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    stop_grace_period: 40s # relay drains for up to 30s, then flushes stats
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
+
+volumes:
+  relay-data:

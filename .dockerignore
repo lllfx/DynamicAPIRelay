@@ -1,0 +1,9 @@
+.git
+.superpowers
+data
+relay.env
+docs
+deploy
+*.md
+Dockerfile
+docker-compose.yaml

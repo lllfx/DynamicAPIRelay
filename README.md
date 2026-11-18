@@ -50,6 +50,21 @@ RELAY_KEYS="client1:$(openssl rand -hex 32)" ./relay
 - `GET /healthz` is an unauthenticated liveness check.
 - Logs are JSON on stdout and never contain relay keys, upstream credentials, or target paths/queries.
 
+### Deploying with Docker
+
+```bash
+cp deploy/relay.env.example relay.env     # set RELAY_KEYS and RELAY_DASHBOARD_PASSWORD (both required)
+docker compose up -d --build              # China-side build host: GOPROXY=https://goproxy.cn,direct docker compose up -d --build
+docker compose logs -f relay
+```
+
+- Relay: `http://<server-ip>:8080/v1/relay` (host port via `RELAY_HOST_PORT`).
+- Dashboard: published on the host's `127.0.0.1:8081` only (`DASHBOARD_HOST_PORT`); open it with `ssh -L 8081:127.0.0.1:8081 <server>`, log in as `admin` / `RELAY_DASHBOARD_PASSWORD`.
+- Stats live in the `relay-data` named volume; `docker compose down -v` deletes them.
+- The container runs as a non-root user with a read-only root filesystem and no capabilities.
+- **Plain HTTP warning:** without a TLS terminator in front, the relay key, upstream `Authorization` headers and request bodies cross the network unencrypted. Use it only over a trusted path (VPN/SSH tunnel), or put a TLS terminator in front before exposing it to the Internet.
+- Docker-published ports bypass `ufw`/firewalld rules; restrict port 8080 at the cloud security group if only some client IPs should reach it.
+
 ### Usage dashboard
 
 Per-key request counts, bytes, error rates (relay errors vs. upstream 4xx/5xx vs. aborted streams; client cancels shown separately) and recent failed requests with request IDs.
