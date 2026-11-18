@@ -1,0 +1,35 @@
+{{define "heading"}}<a href="/?range={{.Range.Name}}">看板</a> / {{.Label}}{{end}}
+{{define "content"}}
+<section class="cards">
+  <div class="card"><div class="k">请求</div><div class="v">{{num .Totals.Requests}}</div></div>
+  <div class="card"><div class="k">错误率</div><div class="v">{{rate .Totals.Counts}}</div></div>
+  <div class="card"><div class="k">上游错误 / 流中断 / relay 错误</div><div class="v">{{num .Totals.UpstreamErrors}} / {{num .Totals.Aborted}} / {{num .Totals.RelayErrors}}</div></div>
+  <div class="card"><div class="k">上行 / 下行</div><div class="v">{{bytes .Totals.BytesIn}} / {{bytes .Totals.BytesOut}}</div></div>
+  <div class="card"><div class="k">p95 耗时</div><div class="v">{{dur .Totals.P95}}</div></div>
+</section>
+<h2>趋势</h2>
+{{template "trend" .}}
+<h2>目标主机（前 20）</h2>
+<div class="panel"><table>
+<thead><tr><th>主机</th><th>请求</th><th>错误</th><th>错误率</th><th>下行</th></tr></thead>
+<tbody>{{range .Hosts}}<tr><td>{{if .Host}}{{.Host}}{{else}}<span class="muted">(未到达目标)</span>{{end}}</td><td>{{num .Requests}}</td><td>{{num .Errors}}</td><td>{{pct .Errors .Requests}}</td><td>{{bytes .BytesOut}}</td></tr>
+{{else}}<tr><td colspan="5" class="muted">暂无数据</td></tr>{{end}}</tbody></table></div>
+<h2>错误分布</h2>
+<div class="panel"><table>
+<thead><tr><th>类别</th><th>值</th><th>次数</th></tr></thead>
+<tbody>
+{{range .Codes}}<tr><td>relay 错误</td><td class="l">{{.Label}}</td><td>{{num .Count}}</td></tr>{{end}}
+{{range .Statuses}}<tr><td>上游状态码</td><td class="l">{{.Label}}</td><td>{{num .Count}}</td></tr>{{end}}
+{{if .Totals.Aborted}}<tr><td>流中断</td><td class="l">—</td><td>{{num .Totals.Aborted}}</td></tr>{{end}}
+{{if not (or .Codes .Statuses .Totals.Aborted)}}<tr><td colspan="3" class="muted">无错误</td></tr>{{end}}
+</tbody></table></div>
+<h2>最近失败请求</h2>
+<div class="panel"><table>
+<thead><tr><th>时间</th><th>方法</th><th>目标主机</th><th>状态码</th><th>错误码</th><th>流中断</th><th>耗时</th><th>请求 ID</th><th>客户端 IP</th></tr></thead>
+<tbody>{{range .Failures}}<tr>
+  <td>{{ts .Time}}</td><td class="l">{{.Method}}</td><td class="l">{{.TargetHost}}</td><td>{{.Status}}</td>
+  <td class="l">{{.ErrorCode}}</td><td>{{if .Aborted}}是{{end}}</td><td>{{dur .Duration}}</td>
+  <td class="l">{{.RequestID}}</td><td class="l">{{.ClientIP}}</td>
+</tr>{{else}}<tr><td colspan="9" class="muted">无失败请求</td></tr>{{end}}</tbody></table></div>
+{{if .NextHref}}<p><a href="{{.NextHref}}">更早 →</a></p>{{end}}
+{{end}}
