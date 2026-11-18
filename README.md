@@ -45,7 +45,7 @@ go build -o relay ./cmd/relay
 RELAY_KEYS="client1:$(openssl rand -hex 32)" ./relay
 ```
 
-- Relay listens on `127.0.0.1:8080`; put Caddy/NGINX in front for public TLS (see [`deploy/Caddyfile.example`](deploy/Caddyfile.example)).
+- Relay listens on `127.0.0.1:8080` by default (`RELAY_LISTEN_ADDR`).
 - All settings are environment variables; see [`deploy/relay.env.example`](deploy/relay.env.example).
 - `GET /healthz` is an unauthenticated liveness check.
 - Logs are JSON on stdout and never contain relay keys, upstream credentials, or target paths/queries.
