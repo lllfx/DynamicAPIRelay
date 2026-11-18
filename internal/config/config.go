@@ -4,6 +4,8 @@ package config
 import (
 	"errors"
 	"fmt"
+	"net"
+	"net/netip"
 	"regexp"
 	"strconv"
 	"strings"
@@ -26,6 +28,13 @@ type Config struct {
 	IdleConnTimeout       time.Duration     // RELAY_IDLE_CONN_TIMEOUT
 	MaxRequestDuration    time.Duration     // RELAY_MAX_REQUEST_DURATION (0 = unlimited)
 	ReadHeaderTimeout     time.Duration     // RELAY_READ_HEADER_TIMEOUT
+
+	StatsDB            string         // RELAY_STATS_DB
+	StatsRetentionDays int            // RELAY_STATS_RETENTION_DAYS
+	DashboardAddr      string         // RELAY_DASHBOARD_ADDR ("" = disabled)
+	DashboardPassword  string         // RELAY_DASHBOARD_PASSWORD
+	DashboardLocation  *time.Location // RELAY_DASHBOARD_TZ
+	TrustedProxies     []string       // RELAY_TRUSTED_PROXIES
 }
 
 // MinKeyBytes is the minimum relay secret length.
@@ -57,10 +66,68 @@ func Load(lookup func(string) (string, bool)) (Config, error) {
 	c.IdleConnTimeout = getDur(lookup, "RELAY_IDLE_CONN_TIMEOUT", 90*time.Second, &errs)
 	c.MaxRequestDuration = getDur(lookup, "RELAY_MAX_REQUEST_DURATION", 0, &errs)
 	c.ReadHeaderTimeout = getDur(lookup, "RELAY_READ_HEADER_TIMEOUT", 10*time.Second, &errs)
+	loadDashboard(lookup, &c, &errs)
 	if err := errors.Join(errs...); err != nil {
 		return Config{}, err
 	}
 	return c, nil
+}
+
+func loadDashboard(lookup func(string) (string, bool), c *Config, errs *[]error) {
+	c.StatsDB = "./data/relay-stats.db"
+	if v, ok := lookup("RELAY_STATS_DB"); ok && v != "" {
+		c.StatsDB = v
+	}
+	c.StatsRetentionDays = int(getInt(lookup, "RELAY_STATS_RETENTION_DAYS", 30, 1, errs))
+
+	c.DashboardAddr = "127.0.0.1:8081"
+	if v, ok := lookup("RELAY_DASHBOARD_ADDR"); ok {
+		c.DashboardAddr = strings.TrimSpace(v) // explicitly empty disables the dashboard
+	}
+	c.DashboardPassword, _ = lookup("RELAY_DASHBOARD_PASSWORD")
+	if c.DashboardAddr != "" {
+		host, _, err := net.SplitHostPort(c.DashboardAddr)
+		switch {
+		case err != nil:
+			*errs = append(*errs, fmt.Errorf("RELAY_DASHBOARD_ADDR: must be host:port"))
+		case !isLoopback(host) && c.DashboardPassword == "":
+			*errs = append(*errs, fmt.Errorf("RELAY_DASHBOARD_ADDR %q is not a loopback address; set RELAY_DASHBOARD_PASSWORD or bind to 127.0.0.1", c.DashboardAddr))
+		}
+	}
+
+	tz := "Asia/Shanghai"
+	if v, ok := lookup("RELAY_DASHBOARD_TZ"); ok && v != "" {
+		tz = v
+	}
+	loc, err := time.LoadLocation(tz)
+	if err != nil {
+		*errs = append(*errs, fmt.Errorf("RELAY_DASHBOARD_TZ: unknown time zone %q", tz))
+		loc = time.UTC
+	}
+	c.DashboardLocation = loc
+
+	c.TrustedProxies = []string{"127.0.0.1/32", "::1/128"}
+	if v, ok := lookup("RELAY_TRUSTED_PROXIES"); ok {
+		c.TrustedProxies = nil
+		for _, p := range strings.Split(v, ",") {
+			if p = strings.TrimSpace(p); p == "" {
+				continue
+			}
+			if _, err := netip.ParsePrefix(p); err != nil {
+				*errs = append(*errs, fmt.Errorf("RELAY_TRUSTED_PROXIES: %q is not a CIDR", p))
+				continue
+			}
+			c.TrustedProxies = append(c.TrustedProxies, p)
+		}
+	}
+}
+
+func isLoopback(host string) bool {
+	if host == "localhost" {
+		return true
+	}
+	a, err := netip.ParseAddr(host)
+	return err == nil && a.IsLoopback()
 }
 
 func parseKeys(lookup func(string) (string, bool)) (map[string]string, error) {

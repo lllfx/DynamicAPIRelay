@@ -75,3 +75,54 @@ func TestLoadRejectsBadNumbers(t *testing.T) {
 		}
 	}
 }
+
+func TestLoadDashboardDefaults(t *testing.T) {
+	c, err := config.Load(env(map[string]string{"RELAY_KEYS": "a:" + secret}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.StatsDB != "./data/relay-stats.db" || c.StatsRetentionDays != 30 || c.DashboardAddr != "127.0.0.1:8081" ||
+		c.DashboardPassword != "" || c.DashboardLocation == nil || c.DashboardLocation.String() != "Asia/Shanghai" ||
+		strings.Join(c.TrustedProxies, ",") != "127.0.0.1/32,::1/128" {
+		t.Fatalf("defaults %+v", c)
+	}
+}
+
+func TestLoadDashboardDisabled(t *testing.T) {
+	c, err := config.Load(env(map[string]string{"RELAY_KEYS": "a:" + secret, "RELAY_DASHBOARD_ADDR": ""}))
+	if err != nil || c.DashboardAddr != "" {
+		t.Fatalf("addr %q err %v", c.DashboardAddr, err)
+	}
+}
+
+func TestLoadRejectsPublicDashboardWithoutPassword(t *testing.T) {
+	for _, addr := range []string{"0.0.0.0:8081", ":8081", "10.0.0.5:8081", "example.com:8081"} {
+		if _, err := config.Load(env(map[string]string{"RELAY_KEYS": "a:" + secret, "RELAY_DASHBOARD_ADDR": addr})); err == nil {
+			t.Errorf("%s without password: expected error", addr)
+		}
+	}
+	if _, err := config.Load(env(map[string]string{"RELAY_KEYS": "a:" + secret, "RELAY_DASHBOARD_ADDR": "0.0.0.0:8081",
+		"RELAY_DASHBOARD_PASSWORD": "pw"})); err != nil {
+		t.Errorf("public with password: %v", err)
+	}
+	for _, addr := range []string{"localhost:8081", "[::1]:8081", "127.0.0.2:8081"} {
+		if _, err := config.Load(env(map[string]string{"RELAY_KEYS": "a:" + secret, "RELAY_DASHBOARD_ADDR": addr})); err != nil {
+			t.Errorf("%s: %v", addr, err)
+		}
+	}
+}
+
+func TestLoadRejectsBadDashboardValues(t *testing.T) {
+	for k, v := range map[string]string{
+		"RELAY_DASHBOARD_TZ": "Mars/Base", "RELAY_TRUSTED_PROXIES": "notacidr", "RELAY_STATS_RETENTION_DAYS": "0",
+		"RELAY_DASHBOARD_ADDR": "nonsense",
+	} {
+		if _, err := config.Load(env(map[string]string{"RELAY_KEYS": "a:" + secret, k: v})); err == nil {
+			t.Errorf("%s=%s: expected error", k, v)
+		}
+	}
+	c, err := config.Load(env(map[string]string{"RELAY_KEYS": "a:" + secret, "RELAY_TRUSTED_PROXIES": " 10.0.0.0/8 , ::1/128 "}))
+	if err != nil || strings.Join(c.TrustedProxies, ",") != "10.0.0.0/8,::1/128" {
+		t.Errorf("proxies %v err %v", c.TrustedProxies, err)
+	}
+}

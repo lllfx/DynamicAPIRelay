@@ -1,6 +1,6 @@
 # DynamicAPIRelay
 
-> Design-first specification for a **dynamic, authenticated HTTPS API relay** built with Go + Gin. **This repository currently contains design documents only; no production implementation has been committed.**
+> A **dynamic, authenticated HTTPS API relay** built with Go + Gin, with a SQLite-backed per-key usage dashboard. **Status: v1 implemented** (see [Running](#running)).
 
 ## Goal
 
@@ -34,13 +34,35 @@ Content-Type: application/json
 - Initial policy: HTTPS on port 443 only, DNS hostnames only (no IP literals), public Internet destination IPs only. Authentication **does not** override SSRF restrictions.
 - v1 does **not** follow redirects automatically. A 3xx `Location` is returned as received; clients must avoid following it directly if they require every hop to use the relay.
 
+## Running
+
+Requires Go 1.24+.
+
+```bash
+go build -o relay ./cmd/relay
+RELAY_KEYS="client1:$(openssl rand -hex 32)" ./relay
+```
+
+- Relay listens on `127.0.0.1:8080`; put Caddy/NGINX in front for public TLS (see [`deploy/Caddyfile.example`](deploy/Caddyfile.example)).
+- All settings are environment variables; see [`deploy/relay.env.example`](deploy/relay.env.example).
+- `GET /healthz` is an unauthenticated liveness check.
+- Logs are JSON on stdout and never contain relay keys, upstream credentials, or target paths/queries.
+
+### Usage dashboard
+
+Per-key request counts, bytes, error rates (relay errors vs. upstream 4xx/5xx vs. aborted streams; client cancels shown separately) and recent failed requests with request IDs.
+
+- Stored in SQLite at `RELAY_STATS_DB` (default `./data/relay-stats.db`), retained `RELAY_STATS_RETENTION_DAYS` (default 30).
+- Served on `127.0.0.1:8081` by default; open it through an SSH tunnel: `ssh -L 8081:127.0.0.1:8081 <server>` then browse `http://127.0.0.1:8081/`.
+- Binding to a non-loopback address requires `RELAY_DASHBOARD_PASSWORD` (HTTP Basic, user `admin`). Set `RELAY_DASHBOARD_ADDR=` (empty) to disable it.
+
 ## Design documents
 
 1. [Architecture & component boundaries](docs/ARCHITECTURE.md)
 2. [HTTP API contract & examples](docs/API_SPEC.md)
 3. [Security & threat model](docs/SECURITY.md)
-4. [Implementation roadmap & acceptance criteria](docs/IMPLEMENTATION_PLAN.md)
-5. [Test matrix](docs/TEST_PLAN.md)
+4. [Usage dashboard design](docs/superpowers/specs/2026-11-18-usage-dashboard-design.md)
+5. [Implementation plan](docs/superpowers/plans/2026-11-18-dynamic-api-relay-v1.md)
 
 ## Suggested technology
 
