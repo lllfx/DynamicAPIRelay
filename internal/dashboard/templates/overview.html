@@ -1,0 +1,22 @@
+{{define "heading"}}DynamicAPIRelay 用量看板{{end}}
+{{define "content"}}
+<section class="cards">
+  <div class="card"><div class="k">请求总数</div><div class="v">{{num .Total.Requests}}</div></div>
+  <div class="card"><div class="k">错误率</div><div class="v">{{rate .Total.Counts}}</div></div>
+  <div class="card"><div class="k">下行流量</div><div class="v">{{bytes .Total.BytesOut}}</div></div>
+  <div class="card"><div class="k">活跃客户端</div><div class="v">{{.ActiveClients}}</div></div>
+</section>
+<h2>趋势</h2>
+{{template "trend" .}}
+<h2>客户端</h2>
+<div class="panel"><table>
+<thead><tr><th>客户端</th><th>请求</th><th>成功</th><th>上游错误</th><th>流中断</th><th>relay 错误</th><th>客户端取消</th><th>错误率</th><th>上行</th><th>下行</th><th>p95 耗时</th><th>最近请求</th></tr></thead>
+<tbody>
+{{range .Rows}}<tr>
+  <td><a href="{{.Href}}?range={{$.Range.Name}}">{{.Label}}</a></td>
+  <td>{{num .Requests}}</td><td>{{num .Success}}</td><td>{{num .UpstreamErrors}}</td><td>{{num .Aborted}}</td>
+  <td>{{num .RelayErrors}}</td><td>{{num .ClientCanceled}}</td><td>{{rate .Counts}}</td>
+  <td>{{bytes .BytesIn}}</td><td>{{bytes .BytesOut}}</td><td>{{dur .P95}}</td><td>{{ts .LastSeen}}</td>
+</tr>{{else}}<tr><td colspan="12" class="muted">暂无数据</td></tr>{{end}}
+</tbody></table></div>
+{{end}}
