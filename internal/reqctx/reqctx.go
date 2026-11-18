@@ -13,6 +13,12 @@ type Info struct {
 	KeyID      string
 	TargetHost string
 	ErrorCode  relayerr.Code
+	ClientIP   string
+	// BytesIn is updated atomically by the relay body reader; read it with
+	// sync/atomic.LoadInt64.
+	BytesIn        int64
+	Aborted        bool // response headers were sent, then the stream failed
+	ClientCanceled bool // client went away before the request finished
 }
 
 type ctxKey struct{}
