@@ -76,4 +76,3 @@ func (u *Upstream) NewTransport(o transport.Options) *http.Transport {
 	}
 	return transport.New(o)
 }
-

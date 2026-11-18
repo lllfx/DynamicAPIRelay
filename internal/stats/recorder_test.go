@@ -10,7 +10,9 @@ import (
 	"github.com/lllfx/DynamicAPIRelay/internal/stats"
 )
 
-func contextWithCancel() (context.Context, context.CancelFunc) { return context.WithCancel(context.Background()) }
+func contextWithCancel() (context.Context, context.CancelFunc) {
+	return context.WithCancel(context.Background())
+}
 
 type fakeSink struct {
 	mu      sync.Mutex
