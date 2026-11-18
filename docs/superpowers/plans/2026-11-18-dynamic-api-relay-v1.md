@@ -2,13 +2,13 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** 用 Go + Gin 实现 `POST|GET|… /v1/relay`：鉴权后按请求头 `X-Relay-Target` 把原始请求流式转发到任意公网 HTTPS API，并原样返回上游响应，同时在拨号时强制 SSRF 防护。
+**Goal:** 用 Go + Gin 实现 `POST|GET|… /v1/relay`：鉴权后按请求头 `X-Relay-Target` 把原始请求流式转发到任意公网 HTTPS API，并原样返回上游响应，同时在拨号时强制 SSRF 防护；并提供按 key 统计用量与报错的 SQLite 看板。
 
 **Architecture:** Gin 只负责路由与中间件（请求 ID、访问日志、恢复、精确路径、鉴权、限流）；转发核心是一个共享的 `httputil.ReverseProxy`（`Rewrite` 模式）+ 一个共享的受保护 `http.Transport`。目标 URL 校验（解析期）与目标 IP 校验（拨号期，`DialContext` + `net.Dialer.Control` 双重检查）分属两个包。所有 relay 自身错误统一为 JSON + `X-Relay-Error: true`。
 
-**Tech Stack:** Go 1.24（本机 go1.24.13），`github.com/gin-gonic/gin v1.10.1`，`golang.org/x/time v0.15.0`（`rate`），标准库 `net/http`、`net/http/httputil`、`net/netip`、`log/slog`、`crypto/subtle`。
+**Tech Stack:** Go 1.24（本机 go1.24.13），`github.com/gin-gonic/gin v1.10.1`，`golang.org/x/time v0.14.0`（`rate`；v0.15 需 Go 1.25），`modernc.org/sqlite v1.40.1`，标准库 `net/http`、`net/http/httputil`、`net/netip`、`log/slog`、`crypto/subtle`。
 
-**Spec:** `README.md`、`docs/ARCHITECTURE.md`、`docs/API_SPEC.md`。（README 引用的 `docs/SECURITY.md`、`docs/IMPLEMENTATION_PLAN.md`、`docs/TEST_PLAN.md` 仓库中不存在；本方案以前三份为准。）
+**Spec:** `README.md`、`docs/ARCHITECTURE.md`、`docs/API_SPEC.md`、`docs/superpowers/specs/2026-11-18-usage-dashboard-design.md`（看板，Task 8–11）。（README 引用的 `docs/SECURITY.md`、`docs/IMPLEMENTATION_PLAN.md`、`docs/TEST_PLAN.md` 仓库中不存在；本方案以前三份为准。）
 
 ## Global Constraints
 
@@ -27,11 +27,19 @@
 
 ## Review Focus
 
+（v1 转发部分）
+
 1. **DNS 返回公私混合地址**（如 A 记录同时含 `10.0.0.1` 与公网地址，或 DNS rebinding）——只拨号允许的地址；全部不允许时返回 403。→ Task 5 `TestAllowedAddrsFiltersMixed`、`TestDialRejectsPrivateResolution`。
 2. **上游伪造 `X-Relay-Error` / `X-Relay-Request-ID` 响应头**——必须剥除，否则客户端会把上游响应误判为 relay 错误。→ Task 7 `TestUpstreamRelayHeadersStripped`。
-3. **流式响应中途失败**（响应上限超出、上游断流）——Gin Recovery 不得写 500 或打栈，连接应被中止。→ Task 8 `TestMidStreamAbortNoStackTrace`。
+3. **流式响应中途失败**（响应上限超出、上游断流）——Gin Recovery 不得写 500 或打栈，连接应被中止。→ Task 9 `TestMidStreamAbortNoStackTrace`。
 4. **带签名的 URL 编码**（路径中的 `%2F`、query 中的 `+`/`%20`）——必须逐字节到达上游。→ Task 7 `TestRawPathAndQueryPreserved`。
-5. **SSE 进行中客户端断开**——上游被取消且并发槽释放，否则一个 key 会被“泄漏”的连接锁死。→ Task 8 `TestClientDisconnectReleasesSlot`。
+5. **SSE 进行中客户端断开**——上游被取消且并发槽释放，否则一个 key 会被“泄漏”的连接锁死。→ Task 9 `TestClientDisconnectReleasesSlot`。
+
+（看板部分）
+
+6. **SQLite 写入慢/失败或队列满**——转发必须不受影响，只丢统计并计数。→ Task 8 `TestRecordNeverBlocks`、`TestInsertFailureKeepsRunning`。
+7. **伪造 `X-Forwarded-For`**——只有来自可信代理的连接才采信，否则记录直连 IP。→ Task 9 `TestUntrustedForwardedForIgnored`。
+8. **看板误暴露**——非环回监听且无密码时拒绝启动。→ Task 11 `TestLoadRejectsPublicDashboardWithoutPassword`。
 
 ---
 
@@ -52,6 +60,12 @@ internal/relay/handler.go         ReverseProxy 核心、头过滤、响应上限
 internal/relaytest/relaytest.go   测试辅助：TLS 上游 + 映射解析器
 internal/server/router.go         Gin 路由与中间件
 internal/server/logging.go        访问日志中间件
+internal/server/record.go         统计记录中间件（仅 /v1/relay）
+internal/stats/store.go           SQLite 打开、schema、批量插入、清理
+internal/stats/recorder.go        非阻塞队列 + 后台批量写
+internal/stats/query.go           看板查询
+internal/dashboard/dashboard.go   看板 HTTP handler（含 Basic 认证、安全头）
+internal/dashboard/templates/*.html, internal/dashboard/svg.go
 deploy/Caddyfile.example, deploy/relay.env.example
 ```
 
@@ -403,6 +417,7 @@ func TestRateLimit(t *testing.T) {
 
 **Files:**
 - Create: `internal/relay/handler.go`, `internal/relaytest/relaytest.go`
+- Modify: `internal/reqctx/reqctx.go`（`Info` 增加 `ClientIP string`、`BytesIn int64`、`Aborted bool`、`ClientCanceled bool`）
 - Test: `internal/relay/handler_test.go`
 
 **Interfaces:**
@@ -434,7 +449,7 @@ func NewUpstream(t *testing.T, h http.Handler) *Upstream // 基于 httptest.NewT
 `ServeHTTP` 流程：
 1. `info := reqctx.From(ctx)`；`w.Header().Set(HeaderRequestID, info.RequestID)`（用 Set，与 Task 8 中间件设置的同值不会重复）。`X-Relay-Target` 出现多次（`len(r.Header.Values(...)) != 1`）→ 400 `REQUEST_INVALID`（缺失 → 400 `TARGET_INVALID`）。
 2. `Policy.Parse` → 失败写错误；成功后 `info.TargetHost = u.Hostname()`。
-3. `r.ContentLength > MaxRequestBytes` → 413；否则 `r.Body = http.MaxBytesReader(w, r.Body, MaxRequestBytes)`。
+3. `r.ContentLength > MaxRequestBytes` → 413；否则 `r.Body = http.MaxBytesReader(w, r.Body, MaxRequestBytes)`，外层再包一个计数读取器，把实际读取的字节累加到 `info.BytesIn`。
 4. `MaxRequestDuration > 0` 时 `context.WithTimeout`。
 5. 把目标 URL 放进私有 context key，交给**构造时创建一次**的 `httputil.ReverseProxy`。
 
@@ -466,6 +481,7 @@ ReverseProxy 配置：
 | `TestResponseTooLargeByContentLength` | `MaxResponseBytes=10`，上游回 `Content-Length: 11` | 502 `UPSTREAM_PROTOCOL_ERROR` |
 | `TestTLSHostnameMismatch` | 解析器把 `evil.test` 映射到 127.0.0.1，目标 `https://evil.test:<port>/` | 502 `UPSTREAM_CONNECT_FAILED` |
 | `TestForbiddenResolution` | Transport 用默认 `AllowIP`（`IsPublic`），解析到 127.0.0.1 | 403 `TARGET_FORBIDDEN` |
+| `TestCountsBytesIn` | POST 1234 字节 body | 请求结束后 `info.BytesIn == 1234` |
 | `TestResponseHeaderTimeout` | `ResponseHeaderTimeout=100ms`，上游 sleep 1s | 504 `UPSTREAM_TIMEOUT` |
 
 - [ ] **Step 2: 运行确认失败** — `go test ./internal/relay/`
@@ -475,91 +491,255 @@ ReverseProxy 配置：
 
 ---
 
-### Task 8: Gin 路由、中间件与访问日志
+### Task 8: stats 存储、异步记录与查询
 
 **Files:**
-- Create: `internal/server/router.go`, `internal/server/logging.go`
-- Test: `internal/server/router_test.go`
+- Create: `internal/stats/store.go`, `internal/stats/recorder.go`, `internal/stats/query.go`
+- Test: `internal/stats/store_test.go`, `internal/stats/recorder_test.go`, `internal/stats/query_test.go`
 
 **Interfaces:**
-- Consumes: `auth.KeyStore.Authenticate`, `limiter.Limiter.Acquire`, `relay.New`, `relayerr.*`, `reqctx.*`
 - Produces:
 ```go
-type Deps struct {
-	Auth    *auth.KeyStore
-	Limiter *limiter.Limiter
-	Relay   http.Handler
-	Logger  *slog.Logger
+type Record struct {
+	Time                                              time.Time // 请求开始
+	RequestID, KeyID, ClientIP, Method, TargetHost    string
+	Status                                            int
+	ErrorCode                                         string
+	Aborted, ClientCanceled                           bool
+	BytesIn, BytesOut                                 int64
+	Duration                                          time.Duration
 }
-func NewRouter(d Deps) *gin.Engine
+func Open(path string) (*Store, error)        // 建目录(0700)；WAL、busy_timeout=5000、synchronous=NORMAL；写连接 MaxOpenConns=1，读连接池独立；建表，PRAGMA user_version=1
+func (s *Store) Close() error
+func (s *Store) Insert(ctx context.Context, recs []Record) error      // 单事务
+func (s *Store) Purge(ctx context.Context, before time.Time) (int64, error) // 每批 5000 行直到删完
+func RunRetention(ctx context.Context, s *Store, retention, every time.Duration, now func() time.Time, logger *slog.Logger) // 立即清理一次，之后每 every 一次，ctx 结束返回
+
+type RecorderOptions struct{ QueueSize, BatchSize int; FlushInterval time.Duration } // 生产：10000, 200, 1s
+type Sink interface{ Insert(ctx context.Context, recs []Record) error } // *Store 满足；测试可注入失败的 Sink
+func NewRecorder(sink Sink, logger *slog.Logger, opts RecorderOptions) *Recorder // 启动后台 goroutine
+func (r *Recorder) Record(rec Record)                    // 非阻塞；队列满则丢弃并 dropped++
+func (r *Recorder) Dropped() int64
+func (r *Recorder) Close(ctx context.Context) error       // 停止接收、刷完队列；ctx 超时返回 ctx.Err()
+
+type Range struct{ From, To time.Time }  // [From, To)
+type Counts struct{ Requests, Success, UpstreamErrors, Aborted, RelayErrors, ClientCanceled int64 }
+func (c Counts) ErrorRate() (rate float64, ok bool) // (Relay+Aborted+Upstream)/(Requests-ClientCanceled)；分母 0 → ok=false
+type Totals struct{ Counts; BytesIn, BytesOut int64; P95 time.Duration; LastSeen time.Time }
+type KeySummary struct{ KeyID string; Totals }
+type Bucket struct{ Start time.Time; Counts }
+type HostStat struct{ Host string; Requests, Errors, BytesOut int64 }
+type LabelCount struct{ Label string; Count int64 }
+type Failure struct{ ID int64; Time time.Time; Method, TargetHost string; Status int; ErrorCode string; Aborted bool; Duration time.Duration; RequestID, ClientIP string }
+
+func (s *Store) Summaries(ctx context.Context, r Range) ([]KeySummary, error)            // 有数据的全部 key，按 Requests 降序
+func (s *Store) KeyTotals(ctx context.Context, keyID string, r Range) (Totals, error)
+func (s *Store) Trend(ctx context.Context, keyID *string, r Range, step time.Duration, loc *time.Location) ([]Bucket, error) // keyID nil=全部；返回连续桶（空桶补 0）
+func (s *Store) TopHosts(ctx context.Context, keyID string, r Range, limit int) ([]HostStat, error)
+func (s *Store) ErrorBreakdown(ctx context.Context, keyID string, r Range) (codes, statuses []LabelCount, err error) // codes: relay error_code；statuses: 上游错误类的 status
+func (s *Store) RecentFailures(ctx context.Context, keyID string, r Range, beforeID int64, limit int) ([]Failure, error) // beforeID<=0 不限；id 倒序；只含非成功、非客户端取消
 ```
 
-路由配置：`gin.SetMode(gin.ReleaseMode)`；`gin.New()`；`RedirectTrailingSlash=false`、`RedirectFixedPath=false`、`HandleMethodNotAllowed=true`；`NoMethod` → 405、`NoRoute` → 404 `NOT_FOUND`（均用 `relayerr.Write`）。`GET /healthz` → 200 `{"status":"ok"}`，无需鉴权。对 GET/HEAD/POST/PUT/PATCH/DELETE 逐个 `Handle("/v1/relay", …)`（不用 `Any`，避免注册 CONNECT/TRACE）。
+表结构与索引严格按设计文档 §4.2（含 `client_canceled` 列）。分类 SQL 在 `query.go` 中定义为一个常量，所有查询共用（优先级：客户端取消 > relay 错误 > 流中断 > 上游错误 > 成功）：
+```sql
+CASE WHEN client_canceled=1 THEN 'canceled' WHEN error_code<>'' THEN 'relay'
+     WHEN aborted=1 THEN 'aborted' WHEN status>=400 THEN 'upstream' ELSE 'success' END
+```
+`Trend` 分桶：桶起点按 `loc` 对齐（小时桶对齐整点，天桶对齐当地零点），用 `loc` 在 `r.From` 处的固定偏移在 SQL 中计算 `(ts + offset_ms) / step_ms`（`Asia/Shanghai` 无夏令时）。`P95`：先 count，再 `ORDER BY duration_ms LIMIT 1 OFFSET ceil(0.95*n)-1`。Recorder 写库失败只记一条 `slog` 错误日志（含条数，不含记录内容）并丢弃该批。
+
+- [ ] **Step 1: 写失败测试**（均用 `t.TempDir()` 下的数据库文件）
+
+| 测试名 | 断言 |
+| --- | --- |
+| `TestOpenCreatesSchema` | 路径含不存在的子目录也能打开；目录权限 0700；`PRAGMA journal_mode` 为 `wal`；`PRAGMA user_version` 为 1；重复 Open 同一文件不报错 |
+| `TestInsertAndPurge` | 插入 3 条（时间分别为 now-40d、now-31d、now-1d），`Purge(now-30d)` 返回 2，剩 1 条 |
+| `TestRecorderFlushesBatch` | `BatchSize=2, FlushInterval=1h`，Record 两条 → 2s 内 Sink 收到 1 批 2 条 |
+| `TestRecorderFlushesOnInterval` | `BatchSize=100, FlushInterval=50ms`，Record 一条 → 2s 内落库 |
+| `TestRecorderCloseFlushes` | Record 5 条后立即 `Close` → Sink 共收到 5 条 |
+| `TestRecordNeverBlocks` | Sink 的 Insert 阻塞到测试结束；`QueueSize=2, BatchSize=1`；连续 Record 100 条在 100ms 内返回；`Dropped() > 0` |
+| `TestInsertFailureKeepsRunning` | Sink 第一次返回错误、之后成功：第一批丢弃，后续记录仍落库 |
+| `TestClassification` | 插入 5 条：canceled+relay 错误码（应算 canceled）、relay 错误码+status 429、aborted+200、status 401、status 302；`KeyTotals` 的 Counts 依次为 ClientCanceled=1, RelayErrors=1, Aborted=1, UpstreamErrors=1, Success=1；`ErrorRate()` == 3/4 |
+| `TestErrorRateZeroDenominator` | 只有 1 条 canceled → `ok == false` |
+| `TestSummariesAndHosts` | alice 3 条、bob 1 条、`""` 2 条；`Summaries` 顺序 alice, `""`, bob；`TopHosts("alice")` 按请求数降序且 Errors/BytesOut 正确；范围外记录不计入 |
+| `TestTrendBuckets` | loc=Asia/Shanghai，24h 范围、1h 步长 → 24 个连续桶，桶起点为当地整点，记录落在正确桶；7d 范围、24h 步长 → 7 个桶，起点为当地零点 |
+| `TestRecentFailuresPaging` | 60 条失败 + 10 条成功 + 5 条 canceled：limit 50 第一页 50 条 id 倒序；用最后一条 id 作 beforeID 第二页 10 条；均不含成功与 canceled |
+| `TestP95` | 1..100ms 共 100 条 → P95 == 95ms |
+
+- [ ] **Step 2: 运行确认失败** — `go test ./internal/stats/`
+- [ ] **Step 3: 实现 store / recorder / query**（`go get modernc.org/sqlite@v1.40.1`，驱动名 `sqlite`）
+- [ ] **Step 4: 运行确认通过** — `go test ./internal/stats/ -race -v`
+- [ ] **Step 5: Commit** — `git commit -m "feat: add sqlite request stats store and async recorder"`
+
+---
+
+### Task 9: Gin 路由、中间件、访问日志与统计记录
+
+**Files:**
+- Create: `internal/server/router.go`, `internal/server/logging.go`, `internal/server/record.go`
+- Test: `internal/server/router_test.go`, `internal/server/record_test.go`
+
+**Interfaces:**
+- Consumes: `auth.KeyStore.Authenticate`, `limiter.Limiter.Acquire`, `relay.New`, `relayerr.*`, `reqctx.*`（含 Task 7 新字段）, `stats.Record`
+- Produces:
+```go
+type Recorder interface{ Record(stats.Record) } // *stats.Recorder 满足
+type Deps struct {
+	Auth           *auth.KeyStore
+	Limiter        *limiter.Limiter
+	Relay          http.Handler
+	Logger         *slog.Logger
+	Recorder       Recorder // nil = 不记录
+	TrustedProxies []string // CIDR；空 = 不信任任何代理
+}
+func NewRouter(d Deps) (*gin.Engine, error) // SetTrustedProxies 失败时返回错误
+```
+
+路由配置：`gin.SetMode(gin.ReleaseMode)`；`gin.New()`；`RedirectTrailingSlash=false`、`RedirectFixedPath=false`、`HandleMethodNotAllowed=true`；`RemoteIPHeaders = []string{"X-Forwarded-For"}`；`SetTrustedProxies(d.TrustedProxies)`（空切片时传 `nil` 表示不信任）。`NoMethod` → 405、`NoRoute` → 404 `NOT_FOUND`（均用 `relayerr.Write`）。`GET /healthz` → 200 `{"status":"ok"}`，无需鉴权。对 GET/HEAD/POST/PUT/PATCH/DELETE 逐个 `Handle("/v1/relay", …)`（不用 `Any`）。
 
 全局中间件顺序：
-1. `requestContext`：生成 `NewRequestID()`，`reqctx.With` 注入 `*Info`，设置响应头 `X-Relay-Request-ID`；`c.Next()` 后输出一条 JSON 访问日志：`request_id, key_id, method, target_host, status, bytes_out, duration_ms, error_code`。**不得**记录任何请求头、目标 path/query、body。
-2. `recoverer`：recover 到 `http.ErrAbortHandler` 时**重新 panic**（交给 net/http 静默中止连接）；其他 panic 记录错误日志并在未写响应时返回 500 `INTERNAL_ERROR`。不使用 `gin.Recovery()`。
+1. `requestContext`：生成 `NewRequestID()`；`info.ClientIP = c.ClientIP()`；`reqctx.With` 注入；设置响应头 `X-Relay-Request-ID`；**在 `defer` 中**输出一条 JSON 访问日志：`request_id, key_id, client_ip, method, target_host, status, bytes_out, duration_ms, error_code`。**不得**记录任何请求头、目标 path/query、body。
+2. `recoverer`：recover 到 `http.ErrAbortHandler` 时**重新 panic**；其他 panic 记录错误日志并在未写响应时返回 500 `INTERNAL_ERROR`。不使用 `gin.Recovery()`。
 
 `/v1/relay` 路由内中间件顺序：
-3. `exactPath`：`r.URL.EscapedPath() != "/v1/relay" || r.URL.RawQuery != "" || r.URL.ForceQuery` → 400 `REQUEST_INVALID`。
-4. `authenticate`：`X-Relay-Key` 恰好一个值且 `Authenticate` 通过，否则 401 `AUTH_FAILED`；成功写 `info.KeyID`。
-5. `limit`：`Acquire(keyID)`，失败写对应 429；成功后 `defer release()` 再 `c.Next()`（panic 时也必须释放）。
-6. 末端：`gin.WrapH(d.Relay)`。
+3. `record`（仅当 `Recorder != nil`）：记下开始时间，`c.Next()`；**在 `defer` 中**：若 recover 到 `http.ErrAbortHandler` 则 `info.Aborted = true`；`info.ClientCanceled = c.Request.Context().Err() != nil`；组装 `stats.Record`（`Status = c.Writer.Status()`，`BytesOut = max(c.Writer.Size(), 0)`，`ErrorCode = string(info.ErrorCode)`）调用 `Recorder.Record`；若之前 recover 到了 panic 值则原样重新 panic。
+4. `exactPath`：`r.URL.EscapedPath() != "/v1/relay" || r.URL.RawQuery != "" || r.URL.ForceQuery` → 400 `REQUEST_INVALID`。
+5. `authenticate`：`X-Relay-Key` 恰好一个值且 `Authenticate` 通过，否则 401 `AUTH_FAILED`；成功写 `info.KeyID`。
+6. `limit`：`Acquire(keyID)`，失败写对应 429；成功后 `defer release()` 再 `c.Next()`。
+7. 末端：`gin.WrapH(d.Relay)`。
+
+所有中间件写 relay 错误时同时设置 `info.ErrorCode`。
 
 - [ ] **Step 1: 写失败测试**
 
-测试搭建：`relaytest.NewUpstream` + `relay.New` + `NewRouter`，挂到 `httptest.NewServer`；日志写入 `bytes.Buffer`（`slog.NewJSONHandler`）。
+测试搭建：`relaytest.NewUpstream` + `relay.New` + `NewRouter`，挂到 `httptest.NewServer`；日志写入 `bytes.Buffer`（`slog.NewJSONHandler`）；`fakeRecorder`（互斥锁保护的切片，提供 `wait(t, n)` 在 2s 内轮询到 n 条）。`TrustedProxies` 默认 `[]string{"127.0.0.1/32"}`。
 
 | 测试名 | 场景 | 断言 |
 | --- | --- | --- |
 | `TestHealthz` | `GET /healthz` 无 key | 200 |
 | `TestAuthFailsBeforeDNS` | 无 key / 错 key / 两个 `X-Relay-Key` | 均 401 `AUTH_FAILED`、`X-Relay-Error: true`、body 相同；`Resolver.Calls == 0` |
-| `TestMethodNotAllowed` | 用 `TRACE`、`OPTIONS`、`PROPFIND` 调 `/v1/relay`（CONNECT 由同一 NoMethod 路径覆盖） | 405 `METHOD_NOT_ALLOWED` |
+| `TestMethodNotAllowed` | `TRACE`、`OPTIONS`、`PROPFIND` 调 `/v1/relay` | 405 `METHOD_NOT_ALLOWED` |
 | `TestAmbiguousPaths` | `/v1/relay?x=1`、`/v1/relay?`、`/v1/%72elay` | 400 `REQUEST_INVALID`；`/v1/relay/`、`/v1//relay` → 404 `NOT_FOUND`；均无重定向 |
-| `TestEndToEndSuccess` | 合法 key + 目标 | 上游状态与 body 透传；响应有 `X-Relay-Request-ID` |
+| `TestEndToEndSuccess` | 合法 key + 目标 | 上游状态与 body 透传；有 `X-Relay-Request-ID` |
 | `TestRateLimited` | `limiter.New(1,1,10)`，连发两次 | 第二次 429 `RATE_LIMITED` |
-| `TestClientDisconnectReleasesSlot` | `limiter.New(100,100,1)`；上游 SSE 写一条后阻塞直到 `r.Context().Done()`（并记录被取消）；客户端读到第一条后取消请求 | 上游 context 在 2s 内被取消；随后同一 key 的新请求不再返回 429（2s 内轮询） |
-| `TestMidStreamAbortNoStackTrace` | `MaxResponseBytes=10`，上游无 Content-Length 流式写 100 字节 | 客户端读 body 返回错误或少于 100 字节；状态码为 200（已写出）；日志中不含 `"INTERNAL_ERROR"` 与 `goroutine` |
-| `TestLogsContainNoSecrets` | key `S3CRET…`，`Authorization: Bearer UPTOKEN`，目标 query `token=QTOKEN` | 日志 buffer 不含 `S3CRET`、`UPTOKEN`、`QTOKEN`；含 `"key_id":"alice"` 与 `"target_host":"example.com"` |
+| `TestClientDisconnectReleasesSlot` | `limiter.New(100,100,1)`；上游 SSE 写一条后阻塞到 `r.Context().Done()`；客户端读到第一条后取消 | 上游 context 2s 内被取消；随后同 key 新请求 2s 内不再 429；对应 Record 的 `ClientCanceled == true` |
+| `TestMidStreamAbortNoStackTrace` | `MaxResponseBytes=10`，上游无 Content-Length 流式写 100 字节 | 客户端读 body 出错或少于 100 字节；状态 200；日志不含 `INTERNAL_ERROR` 与 `goroutine`；Record 的 `Aborted == true` |
+| `TestLogsContainNoSecrets` | key `S3CRET…`，`Authorization: Bearer UPTOKEN`，目标 query `token=QTOKEN` | 日志不含 `S3CRET`、`UPTOKEN`、`QTOKEN`；含 `"key_id":"alice"`、`"target_host":"example.com"` |
+| `TestRecordsRelayRequest` | 合法 POST，body 1234 字节，`X-Forwarded-For: 203.0.113.9` | 恰 1 条 Record：KeyID alice、Method POST、TargetHost example.com、Status 200、BytesIn 1234、BytesOut == 上游 body 长度、ClientIP `203.0.113.9`、RequestID 与响应头一致、Duration > 0；Record 各字符串字段均不含 key/Authorization/query 值 |
+| `TestRecordsAuthFailure` | 错 key | 1 条 Record：KeyID `""`、Status 401、ErrorCode `AUTH_FAILED` |
+| `TestNotRecorded` | `/healthz`、`/nope`、`TRACE /v1/relay` | 200ms 后 Record 数为 0 |
+| `TestUntrustedForwardedForIgnored` | `TrustedProxies` 为空，带 `X-Forwarded-For: 203.0.113.9` | Record 的 ClientIP == `127.0.0.1` |
+| `TestNilRecorder` | `Recorder: nil` 下合法请求 | 200，无 panic |
 
 - [ ] **Step 2: 运行确认失败** — `go test ./internal/server/`
 - [ ] **Step 3: 实现 `NewRouter` 与中间件**
-- [ ] **Step 4: 运行确认通过** — `go test ./... -race -v`
-- [ ] **Step 5: Commit** — `git commit -m "feat: add gin router, auth, limits and access logs"`
+- [ ] **Step 4: 运行确认通过** — `go test ./... -race`
+- [ ] **Step 5: Commit** — `git commit -m "feat: add gin router, auth, limits, access logs and stats recording"`
 
 ---
 
-### Task 9: 进程入口、部署样例与文档
+### Task 10: 看板 HTTP handler
 
 **Files:**
-- Create: `cmd/relay/main.go`, `deploy/Caddyfile.example`, `deploy/relay.env.example`
-- Modify: `README.md`（状态行与“如何运行”小节）
+- Create: `internal/dashboard/dashboard.go`, `internal/dashboard/svg.go`, `internal/dashboard/templates/layout.html`, `internal/dashboard/templates/overview.html`, `internal/dashboard/templates/key.html`
+- Test: `internal/dashboard/dashboard_test.go`
 
 **Interfaces:**
-- Consumes: `config.Load(os.LookupEnv)`、`auth.NewKeyStore`、`limiter.New`、`transport.New`、`policy.Default`、`relay.New`、`server.NewRouter`
-
-`main`：加载配置（失败打印错误并 `os.Exit(1)`）→ 组装依赖（`slog.NewJSONHandler(os.Stdout)`）→ `http.Server{Addr: ListenAddr, Handler: router, ReadHeaderTimeout: cfg.ReadHeaderTimeout, MaxHeaderBytes: 64 << 10, IdleTimeout: 120 * time.Second}`，**不设** `WriteTimeout`/`ReadTimeout`（会截断 SSE 和大文件）→ 收到 SIGINT/SIGTERM 时 `Shutdown`，宽限 30s。
-
-`deploy/Caddyfile.example`：`relay.example.com { reverse_proxy 127.0.0.1:8080 { flush_interval -1 } }`，并注释说明需关闭缓冲以支持 SSE、`request_body` 上限应 ≥ `RELAY_MAX_REQUEST_BYTES`。
-`deploy/relay.env.example`：列出 Task 2 的全部变量与默认值，`RELAY_KEYS=client1:<用 openssl rand -hex 32 生成>`，不含真实密钥。
-
-- [ ] **Step 1: 实现 `main.go` 与部署样例**
-- [ ] **Step 2: 构建与静态检查** — `go build ./... && go vet ./... && go test ./... -race`，Expected: 全部通过
-- [ ] **Step 3: 冒烟测试**
-
-```bash
-RELAY_KEYS="dev:$(openssl rand -hex 32)" go run ./cmd/relay &   # 记下 key
-curl -s localhost:8080/healthz                                   # {"status":"ok"}
-curl -si localhost:8080/v1/relay -H 'X-Relay-Target: https://api.github.com/zen'          # 401 AUTH_FAILED
-curl -si localhost:8080/v1/relay -H "X-Relay-Key: $KEY" -H 'X-Relay-Target: https://127.0.0.1/'  # 403 TARGET_FORBIDDEN
-curl -si localhost:8080/v1/relay -H "X-Relay-Key: $KEY" -H 'X-Relay-Target: https://api.github.com/zen'  # 200（需服务器能出网）
+- Consumes: `stats.Store` 的 `Summaries`、`KeyTotals`、`Trend`、`TopHosts`、`ErrorBreakdown`、`RecentFailures`；`stats.Counts.ErrorRate`
+- Produces:
+```go
+type Options struct {
+	Store         *stats.Store
+	Dropped       func() int64     // nil → 显示 0
+	KeyIDs        []string         // 当前配置中的 key ID（不含 secret）
+	Location      *time.Location
+	Password      string           // 非空启用 Basic 认证，用户名 admin
+	RetentionDays int
+	Now           func() time.Time // nil → time.Now
+}
+func New(opts Options) http.Handler
 ```
 
-- [ ] **Step 4: 更新 README** —— 状态改为“v1 已实现”，新增运行方式与环境变量表链接到 `deploy/relay.env.example`；删除“仅设计文档”的表述。
-- [ ] **Step 5: Commit** — `git commit -m "feat: add relay entrypoint and deployment examples"`
+路由（`http.ServeMux`，Go 1.22 模式）：`GET /{$}` 总览；`GET /keys/{id}` key 详情；`GET /unauthenticated` 未鉴权详情（keyID `""`）；其他路径 404。非 GET/HEAD → 405。`range` 取 `24h`（默认，1h 桶）、`7d`、`30d`（1 天桶），非法值回退 24h；范围 `[now-range, now)`。`id` 不匹配 `^[A-Za-z0-9_-]{1,64}$` → 404；合法但无数据 → 全 0 页面。`before` 非正整数时忽略。
+
+每个响应：`Cache-Control: no-store`、`X-Frame-Options: DENY`、`X-Content-Type-Options: nosniff`、`Content-Security-Policy: default-src 'self'; style-src 'unsafe-inline'`。Basic 认证用 `subtle.ConstantTimeCompare`，失败 401 + `WWW-Authenticate: Basic realm="relay-dashboard"`。
+
+页面内容按设计文档 §4.5：总览 = 4 张卡片（请求总数、错误率、下行流量、活跃客户端数）+ 堆叠趋势 SVG + 客户端表（列：客户端、请求、成功、上游错误、流中断、relay 错误、客户端取消、错误率、上行、下行、p95 耗时、最近请求；`Summaries` ∪ `KeyIDs` 补 0 行；`""` 显示为 `(未鉴权)` 并链接 `/unauthenticated`，其他链接 `/keys/{id}`）+ 页脚“统计丢弃 N 条 · 数据保留 N 天”。详情 = 卡片 + 趋势 + 目标主机前 20 + 错误分布 + 最近失败（每页 50，列：时间、方法、目标主机、状态码、错误码、流中断、耗时、请求 ID、客户端 IP；满 50 条时显示“更早 →”链接 `?range=..&before=<最后一条 id>`）。错误率 `ok=false` 显示 `—`。时间按 `Location` 格式化 `01-02 15:04:05`。模板用 `html/template` + `go:embed`。
+
+`svg.go`：`func trendSVG(buckets []stats.Bucket) template.HTML` —— 按桶画堆叠柱（成功/上游错误/流中断/relay 错误，客户端取消不画），固定 viewBox，无外部资源，只输出数字与固定颜色（无用户数据），所以可安全转为 `template.HTML`。
+
+- [ ] **Step 1: 写失败测试**（用 `stats.Open(t.TempDir()+"/s.db")` + `Insert` 造数据，固定 `Now`）
+
+| 测试名 | 断言 |
+| --- | --- |
+| `TestOverviewListsKeys` | alice 有 3 条（1 条 relay 错误）、`""` 1 条、配置 KeyIDs 含 `carol`（无数据）：200，`text/html`；body 含 `alice`、`(未鉴权)`、`href="/unauthenticated`、`carol`、`<svg`；alice 行出现 `33.3%` |
+| `TestRangeSelection` | 记录在 now-3d：`?range=24h` 不计入、`?range=7d` 计入；`?range=bogus` 等同 24h |
+| `TestKeyDetailFailures` | alice 有一条失败（request_id `req_fail1`, host `api.example.com`, error_code `UPSTREAM_TIMEOUT`）：`/keys/alice` 含这三个字符串 |
+| `TestKeyDetailPaging` | 60 条失败：第一页含“更早”链接且含 `before=`；跟随后第二页 10 行且不含“更早”链接 |
+| `TestUnauthenticatedPage` | `/unauthenticated` 200 并列出 `""` 的失败 |
+| `TestInvalidKeyID` | `/keys/a%20b`、`/keys/` + 65 个 `a` → 404；`/keys/zed`（无数据）→ 200 |
+| `TestSecurityHeaders` | 任意页面带上述 4 个头；`POST /` → 405 |
+| `TestBasicAuth` | `Password: "pw"`：无凭据 401 且有 `WWW-Authenticate`；`admin:wrong` 401；`admin:pw` 200；`Password: ""` 时无凭据 200 |
+| `TestHTMLEscapes` | 插入 target_host 为 `<script>x</script>` 的失败记录（绕过校验直接入库）：详情页不含原样 `<script>x`，含 `&lt;script&gt;` |
+
+- [ ] **Step 2: 运行确认失败** — `go test ./internal/dashboard/`
+- [ ] **Step 3: 实现**
+- [ ] **Step 4: 运行确认通过** — `go test ./internal/dashboard/ -race -v`
+- [ ] **Step 5: Commit** — `git commit -m "feat: add usage dashboard pages"`
+
+---
+
+### Task 11: 配置扩展、进程入口、部署样例与文档
+
+**Files:**
+- Modify: `internal/config/config.go`, `internal/config/config_test.go`, `README.md`
+- Create: `cmd/relay/main.go`, `deploy/Caddyfile.example`, `deploy/relay.env.example`
+
+**Interfaces:**
+- Consumes: 全部前序任务的构造函数
+- Produces（`config.Config` 新增字段）:
+```go
+StatsDB            string         // RELAY_STATS_DB，默认 "./data/relay-stats.db"
+StatsRetentionDays int            // RELAY_STATS_RETENTION_DAYS，默认 30，>=1
+DashboardAddr      string         // RELAY_DASHBOARD_ADDR，未设置默认 "127.0.0.1:8081"；显式设为空 = 关闭看板
+DashboardPassword  string         // RELAY_DASHBOARD_PASSWORD
+DashboardLocation  *time.Location // RELAY_DASHBOARD_TZ，默认 "Asia/Shanghai"，time.LoadLocation 校验
+TrustedProxies     []string       // RELAY_TRUSTED_PROXIES，默认 ["127.0.0.1/32","::1/128"]，每项 netip.ParsePrefix 校验
+```
+看板地址校验：`DashboardAddr != ""` 且 host 不是 `localhost` 也不是环回 IP（含 host 为空如 `:8081`）且 `DashboardPassword == ""` → `Load` 返回错误。
+
+- [ ] **Step 1: 写失败测试**（追加到 `config_test.go`）
+
+```go
+func TestLoadDashboardDefaults(t *testing.T) // StatsDB=="./data/relay-stats.db"；StatsRetentionDays==30；DashboardAddr=="127.0.0.1:8081"；DashboardLocation.String()=="Asia/Shanghai"；TrustedProxies==["127.0.0.1/32","::1/128"]
+func TestLoadDashboardDisabled(t *testing.T) // RELAY_DASHBOARD_ADDR="" → DashboardAddr==""，无错误
+func TestLoadRejectsPublicDashboardWithoutPassword(t *testing.T) // "0.0.0.0:8081"、":8081"、"10.0.0.5:8081" 无密码均报错；"0.0.0.0:8081"+密码通过；"localhost:8081"、"[::1]:8081" 无密码通过
+func TestLoadRejectsBadDashboardValues(t *testing.T) // RELAY_DASHBOARD_TZ="Mars/Base"、RELAY_TRUSTED_PROXIES="notacidr"、RELAY_STATS_RETENTION_DAYS="0" 均报错
+```
+
+- [ ] **Step 2: 运行确认失败** — `go test ./internal/config/`
+- [ ] **Step 3: 实现配置扩展**；运行 `go test ./internal/config/ -v` 通过
+- [ ] **Step 4: 实现 `main.go`**
+
+组装：`config.Load(os.LookupEnv)`（失败打印并 `os.Exit(1)`）→ `stats.Open(cfg.StatsDB)` → `stats.NewRecorder(store, logger, {10000, 200, time.Second})` → `go stats.RunRetention(ctx, store, days*24h, 24h, time.Now, logger)` → relay、router（`TrustedProxies`、`Recorder`）→ relay `http.Server{Addr: ListenAddr, ReadHeaderTimeout, MaxHeaderBytes: 64 << 10, IdleTimeout: 120s}`（**不设** `WriteTimeout`/`ReadTimeout`）→ `DashboardAddr != ""` 时另起 dashboard `http.Server{ReadHeaderTimeout: 10s, WriteTimeout: 30s}`，`KeyIDs` 取 `cfg.Keys` 的键排序。收到 SIGINT/SIGTERM：relay server `Shutdown`(30s) → dashboard `Shutdown`(5s) → 取消清理 ctx → `Recorder.Close`(5s) → `store.Close()`。
+
+`deploy/Caddyfile.example`：`relay.example.com { reverse_proxy 127.0.0.1:8080 { flush_interval -1 } }`，注释说明 SSE 需关闭缓冲、`request_body` 上限应 ≥ `RELAY_MAX_REQUEST_BYTES`、看板端口不要经 Caddy 暴露。`deploy/relay.env.example`：列出 Task 2 与本任务全部变量及默认值，`RELAY_KEYS=client1:<用 openssl rand -hex 32 生成>`，不含真实密钥。`.gitignore` 加 `data/`。
+
+- [ ] **Step 5: 构建与静态检查** — `go mod tidy && go build ./... && go vet ./... && go test ./... -race`，Expected: 全部通过
+- [ ] **Step 6: 冒烟测试**
+
+```bash
+KEY=$(openssl rand -hex 32); RELAY_KEYS="dev:$KEY" RELAY_STATS_DB=/tmp/dar-smoke.db go run ./cmd/relay &
+curl -s localhost:8080/healthz                                                   # {"status":"ok"}
+curl -si localhost:8080/v1/relay -H 'X-Relay-Target: https://api.github.com/zen'  # 401 AUTH_FAILED
+curl -si localhost:8080/v1/relay -H "X-Relay-Key: $KEY" -H 'X-Relay-Target: https://127.0.0.1/'  # 403 TARGET_FORBIDDEN
+sleep 2; curl -s localhost:8081/ | grep -c '(未鉴权)'                              # ≥1，dev 行出现 1 条 relay 错误
+```
+
+- [ ] **Step 7: 更新 README** —— 状态改为“v1 已实现”，新增运行方式、看板访问方式（`ssh -L 8081:127.0.0.1:8081`）、环境变量参见 `deploy/relay.env.example`。
+- [ ] **Step 8: Commit** — `git commit -m "feat: add relay entrypoint, dashboard wiring and deployment examples"`
 
 ---
 
 ## 不在本计划范围（对应 ARCHITECTURE §7）
 
-按 key 单独配置限额、Redis 分布式配额、Prometheus（Milestone 2）；WebSocket `/v1/ws`（Milestone 3）；多区域节点（Milestone 4）；服务端安全跟随重定向（v2）；容器镜像（验收通过后再做）。
+按 key 单独配置限额、Redis 分布式配额、Prometheus（Milestone 2）；WebSocket `/v1/ws`（Milestone 3）；多区域节点（Milestone 4）；服务端安全跟随重定向（v2）；容器镜像（验收通过后再做）；看板的 JSON 接口、告警、实时刷新、多节点汇总。
