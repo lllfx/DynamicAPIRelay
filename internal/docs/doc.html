@@ -1,0 +1,175 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>API 中转使用说明</title>
+<style>
+:root{--bg:#f7f7f8;--card:#fff;--fg:#1d1d1f;--muted:#6b6b70;--line:#e3e3e6;--accent:#2f6fde;--code:#f1f2f4;--warn:#fff6e5;--warnline:#f0c36d}
+@media (prefers-color-scheme: dark){:root{--bg:#141416;--card:#1e1e21;--fg:#ececee;--muted:#9a9aa1;--line:#2e2e33;--accent:#6d9cf0;--code:#26262a;--warn:#2d2614;--warnline:#8a6d2a}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.7 -apple-system,"PingFang SC","Microsoft YaHei",system-ui,sans-serif}
+main{max-width:880px;margin:0 auto;padding:24px 16px 64px;overflow-wrap:anywhere}
+h1{font-size:26px;margin:0 0 4px}h2{font-size:19px;margin:36px 0 10px;padding-top:8px;border-top:1px solid var(--line)}h3{font-size:15px;margin:20px 0 6px}
+p{margin:8px 0}.lead{color:var(--muted);margin-bottom:20px}
+a{color:var(--accent)}
+code{font:13px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;background:var(--code);padding:1px 5px;border-radius:4px;overflow-wrap:anywhere}
+pre{background:var(--code);border:1px solid var(--line);border-radius:8px;padding:12px 14px;overflow-x:auto;margin:8px 0}
+pre code{background:none;padding:0;font-size:13px;overflow-wrap:normal;white-space:pre}
+table{border-collapse:collapse;width:100%;margin:8px 0;font-size:14px}
+th,td{border-bottom:1px solid var(--line);padding:7px 8px;text-align:left;vertical-align:top}
+th{color:var(--muted);font-weight:500;font-size:13px}
+.tw{overflow-x:auto}
+.note{background:var(--warn);border:1px solid var(--warnline);border-radius:8px;padding:10px 14px;margin:12px 0}
+nav.toc{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:10px 16px;font-size:14px}
+nav.toc a{margin-right:14px;white-space:nowrap}
+ul{padding-left:22px;margin:6px 0}li{margin:3px 0}
+</style>
+</head>
+<body><main>
+<h1>API 中转使用说明</h1>
+<p class="lead">把你要调用的海外 API 地址放进请求头，发到本中转，中转替你请求并把结果原样返回。新增目标网站不需要改任何配置。</p>
+
+<nav class="toc">
+<a href="#quick">快速开始</a><a href="#format">请求格式</a><a href="#examples">示例</a><a href="#response">怎么判断结果</a><a href="#errors">错误码</a><a href="#limits">限制</a><a href="#notes">注意事项</a>
+</nav>
+
+<h2 id="quick">快速开始</h2>
+<p>中转地址：<code>{{.Base}}/v1/relay</code>。你需要一个中转 key，向管理员申请，<b>每人一个，不要转发给别人</b>。</p>
+<pre><code>curl '{{.Base}}/v1/relay' \
+  -H 'X-Relay-Key: 你的中转key' \
+  -H 'X-Relay-Target: https://api.github.com/zen'</code></pre>
+<p>返回的就是 <code>https://api.github.com/zen</code> 的响应内容。</p>
+
+<h2 id="format">请求格式</h2>
+<p>把原来发给目标 API 的请求原样发给中转，只做两处改动：</p>
+<ol>
+<li>请求地址改成 <code>{{.Base}}/v1/relay</code>（后面<b>不要</b>加任何路径或 <code>?</code> 参数）。</li>
+<li>加两个请求头：<code>X-Relay-Key</code> 和 <code>X-Relay-Target</code>。</li>
+</ol>
+<div class="tw"><table>
+<tr><th>项目</th><th>说明</th></tr>
+<tr><td><code>X-Relay-Key</code></td><td>必填。中转 key，只用于中转鉴权，<b>不会</b>发给目标 API。</td></tr>
+<tr><td><code>X-Relay-Target</code></td><td>必填。目标 API 的<b>完整</b>地址，包括路径和查询参数，例如 <code>https://api.example.com/v1/chat?stream=true</code>。不会发给目标 API。</td></tr>
+<tr><td>请求方法</td><td>与目标 API 一致：GET、HEAD、POST、PUT、PATCH、DELETE。</td></tr>
+<tr><td><code>Authorization</code>、<code>x-api-key</code> 等</td><td>目标 API 自己的认证头，照常带上，中转会原样转发给目标。</td></tr>
+<tr><td>请求体</td><td>原样转发，JSON、表单、文件上传、二进制都可以。</td></tr>
+</table></div>
+
+<h2 id="examples">示例</h2>
+<h3>JSON POST（目标 API 有自己的 token）</h3>
+<pre><code>curl '{{.Base}}/v1/relay' \
+  -X POST \
+  -H 'X-Relay-Key: 你的中转key' \
+  -H 'X-Relay-Target: https://api.example.com/v1/chat' \
+  -H 'Authorization: Bearer 目标API的token' \
+  -H 'Content-Type: application/json' \
+  --data-binary '{"message":"hello"}'</code></pre>
+
+<h3>流式输出（SSE）</h3>
+<pre><code>curl -N '{{.Base}}/v1/relay' \
+  -X POST \
+  -H 'X-Relay-Key: 你的中转key' \
+  -H 'X-Relay-Target: https://api.example.com/v1/stream' \
+  -H 'Content-Type: application/json' \
+  --data-binary '{"stream":true}'</code></pre>
+
+<h3>上传文件</h3>
+<pre><code>curl '{{.Base}}/v1/relay' \
+  -H 'X-Relay-Key: 你的中转key' \
+  -H 'X-Relay-Target: https://uploads.example.com/v1/files' \
+  -F 'file=@./demo.pdf' -F 'purpose=review'</code></pre>
+
+<h3>下载文件</h3>
+<pre><code>curl '{{.Base}}/v1/relay' \
+  -H 'X-Relay-Key: 你的中转key' \
+  -H 'X-Relay-Target: https://files.example.com/releases/archive.zip' \
+  -o archive.zip</code></pre>
+
+<h3>Python（requests）</h3>
+<pre><code>import requests
+
+RELAY = "{{.Base}}/v1/relay"
+RELAY_KEY = "你的中转key"
+
+def relay(method, target_url, **kwargs):
+    headers = kwargs.pop("headers", {})
+    headers.update({"X-Relay-Key": RELAY_KEY, "X-Relay-Target": target_url})
+    # allow_redirects=False：中转不跟随重定向，客户端也不要自动跟随
+    return requests.request(method, RELAY, headers=headers, allow_redirects=False, **kwargs)
+
+resp = relay("POST", "https://api.example.com/v1/chat",
+             headers={"Authorization": "Bearer 目标API的token"},
+             json={"message": "hello"}, timeout=120)
+if resp.headers.get("X-Relay-Error") == "true":
+    print("中转报错:", resp.json()["error"])   # 见下方错误码
+else:
+    print(resp.status_code, resp.text)       # 目标 API 的原始响应
+
+# 等价写法：requests.post(RELAY, headers={...}, json={...})</code></pre>
+
+<h3>JavaScript / Node.js（fetch）</h3>
+<pre><code>const resp = await fetch("{{.Base}}/v1/relay", {
+  method: "POST",
+  redirect: "manual",
+  headers: {
+    "X-Relay-Key": "你的中转key",
+    "X-Relay-Target": "https://api.example.com/v1/chat",
+    "Authorization": "Bearer 目标API的token",
+    "Content-Type": "application/json",
+  },
+  body: JSON.stringify({ message: "hello" }),
+});
+if (resp.headers.get("X-Relay-Error") === "true") {
+  console.error("中转报错:", (await resp.json()).error);
+} else {
+  console.log(resp.status, await resp.text());
+}</code></pre>
+<p>请在服务端或命令行使用，不要把中转 key 写进浏览器前端代码。</p>
+
+<h2 id="response">怎么判断结果</h2>
+<ul>
+<li>响应头 <b><code>X-Relay-Error: true</code></b>：是<b>中转自己</b>拒绝或出错，响应体是 JSON，格式见下方错误码。</li>
+<li>没有这个头：就是<b>目标 API 的原始响应</b>，状态码、响应头、内容都原样透传。比如目标返回 401，说明是目标 API 的 token 有问题，不是中转 key 的问题。</li>
+<li>每个响应都带 <code>X-Relay-Request-ID</code>。遇到问题时把它发给管理员，可以直接查到这次请求。</li>
+</ul>
+<pre><code>{"error":{"code":"TARGET_FORBIDDEN","message":"Destination is not allowed","request_id":"req_..."}}</code></pre>
+
+<h2 id="errors">错误码（仅在 X-Relay-Error: true 时）</h2>
+<div class="tw"><table>
+<tr><th>状态码</th><th>错误码</th><th>原因与处理</th></tr>
+<tr><td>400</td><td><code>TARGET_INVALID</code></td><td>没带 <code>X-Relay-Target</code>，或地址格式不对（不是完整 URL、含空格或 <code>#</code>、百分号编码错误等）。</td></tr>
+<tr><td>400</td><td><code>REQUEST_INVALID</code></td><td>中转地址后面带了路径或 <code>?</code> 参数、重复写了 <code>X-Relay-Target</code>，或使用了 WebSocket/Upgrade。</td></tr>
+<tr><td>401</td><td><code>AUTH_FAILED</code></td><td>中转 key 缺失或错误。</td></tr>
+<tr><td>403</td><td><code>TARGET_FORBIDDEN</code></td><td>目标不允许：不是 https、用了 IP 地址或非 443 端口、或域名解析到内网地址。</td></tr>
+<tr><td>404</td><td><code>NOT_FOUND</code></td><td>中转地址写错了，应为 <code>/v1/relay</code>。</td></tr>
+<tr><td>405</td><td><code>METHOD_NOT_ALLOWED</code></td><td>不支持的请求方法（如 OPTIONS、TRACE）。</td></tr>
+<tr><td>413</td><td><code>REQUEST_TOO_LARGE</code></td><td>请求体超过上限（见下方限制）。</td></tr>
+<tr><td>429</td><td><code>RATE_LIMITED</code></td><td>请求太快，稍后重试。</td></tr>
+<tr><td>429</td><td><code>CONCURRENCY_LIMITED</code></td><td>同时进行中的请求太多，等前面的完成再发。</td></tr>
+<tr><td>502</td><td><code>UPSTREAM_CONNECT_FAILED</code></td><td>连不上目标：域名不存在、拒绝连接或证书错误。</td></tr>
+<tr><td>502</td><td><code>UPSTREAM_PROTOCOL_ERROR</code></td><td>目标返回了无效响应，或响应超过大小上限。</td></tr>
+<tr><td>504</td><td><code>UPSTREAM_TIMEOUT</code></td><td>目标在限定时间内没有开始响应。</td></tr>
+</table></div>
+<p>如果响应已经开始输出（例如流式传输到一半）后才出问题，没法再返回错误 JSON，连接会直接断开。</p>
+
+<h2 id="limits">限制（当前服务器配置）</h2>
+<div class="tw"><table>
+<tr><th>项目</th><th>值</th></tr>
+<tr><td>请求体大小上限</td><td>{{.MaxBody}}</td></tr>
+<tr><td>每个 key 的请求速率</td><td>{{.Rate}}（突发最多 {{.Burst}} 个）</td></tr>
+<tr><td>每个 key 同时进行中的请求</td><td>最多 {{.Concurrent}} 个</td></tr>
+<tr><td>等待目标开始响应的时间</td><td>{{.ResponseHeaderTimeout}}（流式输出开始后不受此限制）</td></tr>
+</table></div>
+
+<h2 id="notes">注意事项</h2>
+<ul>
+<li><b>目标要求</b>：只能是 <code>https://</code>、用域名（不能是 IP）、端口为 443 或不写、且解析到公网地址。</li>
+<li><b>不跟随重定向</b>：目标返回 301/302 等时，中转原样返回。如需继续，请用 <code>Location</code> 里的新地址再发一次中转请求，客户端不要自动跟随。</li>
+<li><b>不支持</b> WebSocket、gRPC、HTTP CONNECT 代理。这是 API 中转，不是 VPN 或网页代理，浏览网页、Cookie、跨域等不保证可用。</li>
+<li><b>不自动重试</b>：失败是否重试由你自己决定，尤其是会产生副作用的 POST 请求。</li>
+<li><b>保管好 key</b>：中转 key 等同于使用权限，不要提交到代码仓库或发到群里。泄露了请联系管理员更换。</li>
+</ul>
+<div class="note">⚠️ 当前访问地址是 <code>{{.Base}}</code>。如果是 <code>http://</code>，中转 key、目标 API 的 token 和请求内容在网络上都是<b>明文传输</b>，可能被截获。请不要通过它发送高敏感数据，并尽量在可信网络中使用。</div>
+</main></body>
+</html>

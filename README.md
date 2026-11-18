@@ -48,6 +48,7 @@ RELAY_KEYS="client1:$(openssl rand -hex 32)" ./relay
 - Relay listens on `127.0.0.1:8080` by default (`RELAY_LISTEN_ADDR`).
 - All settings are environment variables; see [`deploy/relay.env.example`](deploy/relay.env.example).
 - `GET /healthz` is an unauthenticated liveness check.
+- `GET /doc` is an unauthenticated usage guide for client developers (Chinese); examples use the address the reader opened and limits reflect the running config. Share `http://<server>:<port>/doc` with colleagues.
 - Logs are JSON on stdout and never contain relay keys, upstream credentials, or target paths/queries.
 
 ### Deploying with Docker

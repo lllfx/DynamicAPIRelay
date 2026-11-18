@@ -177,3 +177,22 @@ func TestLogsContainNoSecrets(t *testing.T) {
 		t.Fatalf("missing fields: %s", logs)
 	}
 }
+
+func TestDocRouteNoAuthNotRecorded(t *testing.T) {
+	doc := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { io.WriteString(w, "DOC") })
+	e := newEnv(t, okUpstream, mods{deps: func(d *server.Deps) { d.Doc = doc }})
+	resp := e.req(t, context.Background(), "GET", "/doc", nil, nil)
+	b, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != 200 || string(b) != "DOC" {
+		t.Fatalf("status %d body %q", resp.StatusCode, b)
+	}
+	time.Sleep(100 * time.Millisecond)
+	if n := len(e.rec.all()); n != 0 {
+		t.Fatalf("doc request recorded %d times", n)
+	}
+	// Without a Doc handler the route does not exist.
+	e2 := newEnv(t, okUpstream, mods{})
+	if r := e2.req(t, context.Background(), "GET", "/doc", nil, nil); r.StatusCode != 404 {
+		t.Fatalf("no doc handler: status %d", r.StatusCode)
+	}
+}

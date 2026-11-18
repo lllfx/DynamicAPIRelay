@@ -17,6 +17,7 @@ import (
 	"github.com/lllfx/DynamicAPIRelay/internal/auth"
 	"github.com/lllfx/DynamicAPIRelay/internal/config"
 	"github.com/lllfx/DynamicAPIRelay/internal/dashboard"
+	"github.com/lllfx/DynamicAPIRelay/internal/docs"
 	"github.com/lllfx/DynamicAPIRelay/internal/limiter"
 	"github.com/lllfx/DynamicAPIRelay/internal/policy"
 	"github.com/lllfx/DynamicAPIRelay/internal/relay"
@@ -69,6 +70,10 @@ func run() error {
 		Logger:         logger,
 		Recorder:       recorder,
 		TrustedProxies: cfg.TrustedProxies,
+		Doc: docs.Handler(docs.Options{
+			MaxRequestBytes: cfg.MaxRequestBytes, RatePerSec: cfg.RatePerSec, RateBurst: cfg.RateBurst,
+			MaxConcurrent: cfg.MaxConcurrent, ResponseHeaderTimeout: cfg.ResponseHeaderTimeout,
+		}),
 	})
 	if err != nil {
 		return err

@@ -4,6 +4,7 @@
 #   docker compose up -d --build
 #
 # Relay:     http://<server-ip>:8080/v1/relay   (plain HTTP — see README "Deploying with Docker")
+# Guide:     http://<server-ip>:8080/doc         (usage docs for client developers, no key needed)
 # Dashboard: bound to the host's 127.0.0.1:8081 only; open via
 #            ssh -L 8081:127.0.0.1:8081 <server>  then http://127.0.0.1:8081/
 services:

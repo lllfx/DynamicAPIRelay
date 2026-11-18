@@ -28,8 +28,9 @@ type Deps struct {
 	Limiter        *limiter.Limiter
 	Relay          http.Handler
 	Logger         *slog.Logger
-	Recorder       Recorder // nil = no stats
-	TrustedProxies []string // CIDRs; empty = trust none
+	Recorder       Recorder     // nil = no stats
+	TrustedProxies []string     // CIDRs; empty = trust none
+	Doc            http.Handler // serves GET /doc usage guide; nil = no /doc route
 }
 
 // NewRouter builds the Gin engine.
@@ -56,6 +57,10 @@ func NewRouter(d Deps) (*gin.Engine, error) {
 	e.NoMethod(func(c *gin.Context) { abortWith(c, relayerr.MethodNotAllowed) })
 	e.NoRoute(func(c *gin.Context) { abortWith(c, relayerr.NotFound) })
 	e.GET("/healthz", func(c *gin.Context) { c.JSON(http.StatusOK, gin.H{"status": "ok"}) })
+	if d.Doc != nil {
+		e.GET("/doc", gin.WrapH(d.Doc))
+		e.HEAD("/doc", gin.WrapH(d.Doc))
+	}
 
 	var chain []gin.HandlerFunc
 	if d.Recorder != nil {
