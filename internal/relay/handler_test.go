@@ -314,3 +314,13 @@ func TestCountsBytesIn(t *testing.T) {
 		t.Errorf("TargetHost=%q", info.TargetHost)
 	}
 }
+
+func TestUpgradeRejected(t *testing.T) {
+	var called atomic.Bool
+	h := newHarness(t, func(w http.ResponseWriter, r *http.Request) { called.Store(true) }, nil)
+	resp := h.do(t, "GET", h.up.BaseURL+"/ws", nil, map[string]string{"Connection": "Upgrade", "Upgrade": "websocket"})
+	wantRelayError(t, resp, 400, relayerr.RequestInvalid)
+	if called.Load() {
+		t.Fatal("upgrade request reached upstream")
+	}
+}

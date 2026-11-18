@@ -89,3 +89,18 @@ func TestAllowedPortOverride(t *testing.T) {
 		t.Errorf("implicit 443 should be forbidden when AllowedPort=8443, got %v", err)
 	}
 }
+
+func TestParseRejectsAmbiguousReencoding(t *testing.T) {
+	p := policy.Default()
+	// Go would re-escape the decoded path and turn %2F into '/', changing meaning.
+	for _, raw := range []string{"https://a.example.com/x{y}|z%2F", "https://a.example.com/a^b%2Fc"} {
+		if _, err := p.Parse(raw); err == nil || err.Code != relayerr.TargetInvalid {
+			t.Errorf("Parse(%q) = %v, want TARGET_INVALID", raw, err)
+		}
+	}
+	// Without percent-escapes, re-encoding is harmless and stays allowed.
+	u, err := p.Parse("https://a.example.com/x{y}")
+	if err != nil || u.EscapedPath() != "/x%7By%7D" {
+		t.Errorf("got %v %v", u, err)
+	}
+}

@@ -52,6 +52,9 @@ func (p TargetPolicy) Parse(raw string) (*url.URL, *relayerr.Error) {
 		allDigits(last) || strings.HasPrefix(last, "0x") {
 		return nil, forbidden
 	}
+	if !pathRoundTrips(raw, u) {
+		return nil, invalid
+	}
 	port := u.Port()
 	if strings.HasSuffix(u.Host, ":") {
 		return nil, forbidden // empty port after ':' is ambiguous
@@ -75,6 +78,22 @@ func (p TargetPolicy) Parse(raw string) (*url.URL, *relayerr.Error) {
 		out.RawPath = ""
 	}
 	return &out, nil
+}
+
+// pathRoundTrips reports whether Go will send the path exactly as written.
+// When the raw path holds percent-escapes but also characters Go re-escapes
+// (e.g. "{}|^"), Go drops RawPath and re-encodes the decoded path, which can
+// turn %2F into a real '/'. Such targets are rejected rather than altered.
+// Paths without '%' may be re-escaped harmlessly and are allowed.
+func pathRoundTrips(raw string, u *url.URL) bool {
+	rest := raw[len(u.Scheme)+len("://"):]
+	if i := strings.IndexAny(rest, "/?"); i >= 0 {
+		rest = rest[i:]
+	} else {
+		rest = ""
+	}
+	rawPath, _, _ := strings.Cut(rest, "?")
+	return !strings.Contains(rawPath, "%") || u.EscapedPath() == rawPath
 }
 
 func hasForbiddenBytes(s string) bool {

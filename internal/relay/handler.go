@@ -79,6 +79,11 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.fail(w, info, relayerr.New(relayerr.RequestInvalid))
 		return
 	}
+	if isUpgrade(r.Header) {
+		// WebSocket/HTTP Upgrade is not a v1 feature (ARCHITECTURE §5).
+		h.fail(w, info, relayerr.New(relayerr.RequestInvalid))
+		return
+	}
 	target, perr := h.opts.Policy.Parse(vals[0])
 	if perr != nil {
 		h.fail(w, info, perr)
@@ -123,7 +128,24 @@ func rewrite(pr *httputil.ProxyRequest) {
 	}
 }
 
+func isUpgrade(hdr http.Header) bool {
+	if hdr.Get("Upgrade") != "" {
+		return true
+	}
+	for _, v := range hdr.Values("Connection") {
+		for _, tok := range strings.Split(v, ",") {
+			if strings.EqualFold(strings.TrimSpace(tok), "upgrade") {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func (h *handler) modifyResponse(resp *http.Response) error {
+	if resp.StatusCode == http.StatusSwitchingProtocols {
+		return relayerr.New(relayerr.UpstreamProtocolError)
+	}
 	for k := range resp.Header {
 		if strings.HasPrefix(http.CanonicalHeaderKey(k), "X-Relay-") {
 			delete(resp.Header, k)
